@@ -18,6 +18,8 @@ import logging
 import time
 from functools import cached_property
 
+import numpy as np
+
 from lerobot.cameras import make_cameras_from_configs
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
 from lerobot.motors.feetech import (
@@ -25,6 +27,7 @@ from lerobot.motors.feetech import (
     OperatingMode,
 )
 from lerobot.types import RobotAction, RobotObservation
+from lerobot.utils.constants import OBS_DEPTHS, OBS_MOTOR_CURRENTS, OBS_MOTOR_VELOCITIES, OBS_STR
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
@@ -32,6 +35,9 @@ from ..utils import ensure_safe_goal_position
 from .config_so_follower import SOFollowerRobotConfig
 
 logger = logging.getLogger(__name__)
+RAW_DEPTHS = OBS_DEPTHS.removeprefix(f"{OBS_STR}.")
+RAW_MOTOR_CURRENTS = OBS_MOTOR_CURRENTS.removeprefix(f"{OBS_STR}.")
+RAW_MOTOR_VELOCITIES = OBS_MOTOR_VELOCITIES.removeprefix(f"{OBS_STR}.")
 
 
 class SOFollower(Robot):
@@ -67,14 +73,45 @@ class SOFollower(Robot):
         return {f"{motor}.pos": float for motor in self.bus.motors}
 
     @property
-    def _cameras_ft(self) -> dict[str, tuple]:
+    def _motor_currents_ft(self) -> dict[str, dict]:
+        if not self.config.observe_motor_current:
+            return {}
         return {
-            cam: (self.config.cameras[cam].height, self.config.cameras[cam].width, 3) for cam in self.cameras
+            RAW_MOTOR_CURRENTS: {
+                "dtype": "int32",
+                "shape": (len(self.bus.motors),),
+                "names": [f"{motor}.current" for motor in self.bus.motors],
+            }
         }
 
+    @property
+    def _motor_velocities_ft(self) -> dict[str, dict]:
+        if not self.config.observe_motor_velocity:
+            return {}
+        return {
+            RAW_MOTOR_VELOCITIES: {
+                "dtype": "int32",
+                "shape": (len(self.bus.motors),),
+                "names": [f"{motor}.velocity" for motor in self.bus.motors],
+            }
+        }
+
+    @property
+    def _cameras_ft(self) -> dict[str, tuple | dict]:
+        camera_features = {}
+        for cam in self.cameras:
+            camera_features[cam] = (self.config.cameras[cam].height, self.config.cameras[cam].width, 3)
+            if getattr(self.config.cameras[cam], "use_depth", False):
+                camera_features[f"{RAW_DEPTHS}.{cam}"] = {
+                    "dtype": "uint16",
+                    "shape": (self.config.cameras[cam].height, self.config.cameras[cam].width),
+                    "names": ["height", "width"],
+                }
+        return camera_features
+
     @cached_property
-    def observation_features(self) -> dict[str, type | tuple]:
-        return {**self._motors_ft, **self._cameras_ft}
+    def observation_features(self) -> dict[str, type | tuple | dict]:
+        return {**self._motors_ft, **self._motor_currents_ft, **self._motor_velocities_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -178,15 +215,50 @@ class SOFollower(Robot):
     def get_observation(self) -> RobotObservation:
         # Read arm position
         start = time.perf_counter()
-        obs_dict = self.bus.sync_read("Present_Position")
+        
+        last_error = None
+        for attempt in range(5):
+            try:
+                obs_dict = self.bus.sync_read("Present_Position")
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(f"{self} sync_read failed attempt {attempt+1}/5: {e}")
+                time.sleep(0.002)
+        else:
+            raise last_error
+
         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
+
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
+
+        if self.config.observe_motor_current:
+            start = time.perf_counter()
+            current_values = self.bus.sync_read("Present_Current", normalize=False)
+            obs_dict[RAW_MOTOR_CURRENTS] = np.array(
+                [current_values[motor] for motor in self.bus.motors],
+                dtype=np.int32,
+            )
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read motor currents: {dt_ms:.1f}ms")
+
+        if self.config.observe_motor_velocity:
+            start = time.perf_counter()
+            velocity_values = self.bus.sync_read("Present_Velocity", normalize=False)
+            obs_dict[RAW_MOTOR_VELOCITIES] = np.array(
+                [velocity_values[motor] for motor in self.bus.motors],
+                dtype=np.int32,
+            )
+            dt_ms = (time.perf_counter() - start) * 1e3
+            logger.debug(f"{self} read motor velocities: {dt_ms:.1f}ms")
 
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
             obs_dict[cam_key] = cam.read_latest()
+            if getattr(self.config.cameras[cam_key], "use_depth", False):
+                obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = cam.read_depth(timeout_ms=0)
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 

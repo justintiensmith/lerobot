@@ -28,6 +28,7 @@ import numpy as np
 from lerobot.configs import FeatureType, PolicyFeature
 
 from .constants import ACTION, DEFAULT_FEATURES, OBS_ENV_STATE, OBS_STR
+from .utils import is_valid_numpy_dtype_string
 
 
 def _validate_feature_names(features: dict[str, dict]) -> None:
@@ -44,8 +45,16 @@ def _validate_feature_names(features: dict[str, dict]) -> None:
         raise ValueError(f"Feature names should not contain '/'. Found '/' in '{invalid_features}'.")
 
 
+def is_dataset_feature_spec(value: Any) -> bool:
+    return isinstance(value, dict) and {"dtype", "shape"}.issubset(value)
+
+
+def _prefix_feature_key(key: str, prefix: str) -> str:
+    return key if key == prefix or key.startswith(f"{prefix}.") else f"{prefix}.{key}"
+
+
 def hw_to_dataset_features(
-    hw_features: dict[str, type | tuple], prefix: str, use_video: bool = True
+    hw_features: dict[str, type | tuple | dict], prefix: str, use_video: bool = True
 ) -> dict[str, dict]:
     """Convert hardware-specific features to a LeRobot dataset feature dictionary.
 
@@ -64,12 +73,19 @@ def hw_to_dataset_features(
         dict: A LeRobot features dictionary.
     """
     features = {}
+    dataset_fts = {key: ftype for key, ftype in hw_features.items() if is_dataset_feature_spec(ftype)}
     joint_fts = {
         key: ftype
         for key, ftype in hw_features.items()
-        if ftype is float or (isinstance(ftype, PolicyFeature) and ftype.type != FeatureType.VISUAL)
+        if not is_dataset_feature_spec(ftype)
+        and (ftype is float or (isinstance(ftype, PolicyFeature) and ftype.type != FeatureType.VISUAL))
     }
-    cam_fts = {key: shape for key, shape in hw_features.items() if isinstance(shape, tuple)}
+    cam_fts = {}
+    for key, feature in hw_features.items():
+        if isinstance(feature, tuple) and len(feature) == 3:
+            cam_fts[key] = feature
+        elif isinstance(feature, PolicyFeature) and feature.type is FeatureType.VISUAL:
+            cam_fts[key] = feature.shape
 
     if joint_fts and prefix == ACTION:
         features[prefix] = {
@@ -91,6 +107,9 @@ def hw_to_dataset_features(
             "shape": shape,
             "names": ["height", "width", "channels"],
         }
+
+    for key, feature in dataset_fts.items():
+        features[_prefix_feature_key(key, prefix)] = feature
 
     _validate_feature_names(features)
     return features
@@ -119,6 +138,10 @@ def build_dataset_frame(
             continue
         elif ft["dtype"] == "float32" and len(ft["shape"]) == 1:
             frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
+        elif is_valid_numpy_dtype_string(ft["dtype"]):
+            raw_key = key.removeprefix(f"{prefix}.")
+            if raw_key in values:
+                frame[key] = np.asarray(values[raw_key], dtype=ft["dtype"])
         elif ft["dtype"] in ["image", "video"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 

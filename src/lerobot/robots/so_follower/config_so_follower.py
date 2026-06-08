@@ -41,6 +41,12 @@ class SOFollowerConfig:
     # Set to `True` for backward compatibility with previous policies/dataset
     use_degrees: bool = True
 
+    # Include raw Present_Current motor register values in observations.
+    observe_motor_current: bool = False
+
+    # Include raw Present_Velocity motor register values in observations.
+    observe_motor_velocity: bool = False
+
 
 @RobotConfig.register_subclass("so101_follower")
 @RobotConfig.register_subclass("so100_follower")

@@ -81,6 +81,7 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     return actions
 
 
+@ProcessorStepRegistry.register("delta_actions_processor")
 @ProcessorStepRegistry.register("relative_actions_processor")
 @dataclass
 class RelativeActionsProcessorStep(ProcessorStep):
