@@ -516,9 +516,9 @@ class RealSenseCamera(Camera):
                 capture_time = time.perf_counter()
 
                 with self.frame_lock:
-                    self.latest_color_frame = processed_color_frame
+                    self.latest_color_frame = processed_color_frame.copy()
                     if self.use_depth:
-                        self.latest_depth_frame = processed_depth_frame
+                        self.latest_depth_frame = processed_depth_frame.copy()
                     self.latest_timestamp = capture_time
                 self.new_frame_event.set()
                 failure_count = 0

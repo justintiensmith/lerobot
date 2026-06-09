@@ -150,7 +150,7 @@ def build_dataset_frame(
         elif is_valid_numpy_dtype_string(ft["dtype"]):
             raw_key = key.removeprefix(f"{prefix}.")
             if raw_key in values:
-                frame[key] = np.asarray(values[raw_key], dtype=ft["dtype"])
+                frame[key] = np.array(values[raw_key], dtype=ft["dtype"], copy=True)
         elif ft["dtype"] in ["image", "video"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
 

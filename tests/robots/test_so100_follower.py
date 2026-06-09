@@ -176,6 +176,7 @@ def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower
     camera_name = "angled_realsense"
     rgb_image = np.full((2, 3, 3), 7, dtype=np.uint8)
     depth_map = np.array([[0, 2500, 5000], [6000, 1000, 4000]], dtype=np.uint16)
+    expected_depth_map = depth_map.copy()
 
     camera = MagicMock(name="DepthCamera")
     camera.is_connected = True
@@ -206,7 +207,9 @@ def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower
         "shape": (2, 3),
         "names": ["height", "width"],
     }
-    np.testing.assert_array_equal(frame[dataset_depth_key], depth_map)
+    np.testing.assert_array_equal(frame[dataset_depth_key], expected_depth_map)
+    obs[raw_depth_key][0, 1] = 1234
+    np.testing.assert_array_equal(frame[dataset_depth_key], expected_depth_map)
     np.testing.assert_array_equal(frame[f"{OBS_IMAGES}.{camera_name}"], rgb_image)
     camera.read_latest_rgbd.assert_called_once_with()
     camera.read_latest.assert_not_called()

@@ -223,6 +223,12 @@ def main() -> None:
     writer: cv2.VideoWriter | None = None
     previous_rgb_motion = None
     previous_depth_motion = None
+    previous_rgb = None
+    previous_depth = None
+    current_depth_repeat_run = 0
+    max_depth_repeat_run = 0
+    max_depth_repeat_start_frame: int | None = None
+    current_depth_repeat_start_frame: int | None = None
     rgb_motion_values: list[float] = []
     depth_motion_values: list[float] = []
     csv_rows: list[dict[str, float | int]] = []
@@ -236,19 +242,35 @@ def main() -> None:
         rgb = tensor_image_to_uint8_hwc(sample[image_key])
         depth = depth_to_uint16_hw(sample[depth_key])
         depth_color = colorize_depth(depth, args.min_depth_mm, args.max_depth_mm)
+        frame_index = int(to_numpy(sample["frame_index"]).item())
+        episode_index = int(to_numpy(sample["episode_index"]).item())
 
         rgb_motion_image = prepare_rgb_motion_image(rgb)
         depth_motion_image = prepare_depth_motion_image(depth, args.max_depth_mm)
         rgb_change = mean_abs_change(rgb_motion_image, previous_rgb_motion)
         depth_change = mean_abs_change(depth_motion_image, previous_depth_motion)
+        rgb_exact_repeat = previous_rgb is not None and np.array_equal(rgb, previous_rgb)
+        depth_exact_repeat = previous_depth is not None and np.array_equal(depth, previous_depth)
         previous_rgb_motion = rgb_motion_image
         previous_depth_motion = depth_motion_image
+        previous_rgb = rgb
+        previous_depth = depth
         rgb_motion_values.append(rgb_change)
         depth_motion_values.append(depth_change)
 
+        if depth_exact_repeat:
+            if current_depth_repeat_run == 0:
+                current_depth_repeat_start_frame = frame_index - args.stride
+            current_depth_repeat_run += 1
+        else:
+            current_depth_repeat_run = 0
+            current_depth_repeat_start_frame = None
+
+        if current_depth_repeat_run > max_depth_repeat_run:
+            max_depth_repeat_run = current_depth_repeat_run
+            max_depth_repeat_start_frame = current_depth_repeat_start_frame
+
         valid_fraction, median_depth, p99_depth = valid_depth_stats(depth)
-        frame_index = int(to_numpy(sample["frame_index"]).item())
-        episode_index = int(to_numpy(sample["episode_index"]).item())
         text = (
             f"episode={episode_index} frame={frame_index} "
             f"valid_depth={valid_fraction:.2%} median={median_depth:.0f}mm p99={p99_depth:.0f}mm "
@@ -271,6 +293,8 @@ def main() -> None:
                 "local_index": local_idx,
                 "rgb_change": rgb_change,
                 "depth_change": depth_change,
+                "rgb_exact_repeat": int(rgb_exact_repeat),
+                "depth_exact_repeat": int(depth_exact_repeat),
                 "valid_depth_fraction": valid_fraction,
                 "median_depth_mm": median_depth,
                 "p99_depth_mm": p99_depth,
@@ -288,6 +312,8 @@ def main() -> None:
             "local_index",
             "rgb_change",
             "depth_change",
+            "rgb_exact_repeat",
+            "depth_exact_repeat",
             "valid_depth_fraction",
             "median_depth_mm",
             "p99_depth_mm",
@@ -302,9 +328,14 @@ def main() -> None:
     print(f"Wrote video: {args.output}")
     print(f"Wrote frame diagnostics: {csv_output}")
     print(f"Exported frames: {exported}")
+    print(
+        "Longest exact repeated-depth run: "
+        f"{max_depth_repeat_run} consecutive repeats starting near frame {max_depth_repeat_start_frame}"
+    )
     print(f"Estimated best lag: {best_lag:+d} sampled frames ({lag_seconds:+.3f}s), corr={best_corr:.3f}")
     print("Interpretation: positive lag means depth motion appears later than RGB; zero is what you want.")
 
 
 if __name__ == "__main__":
     main()
+
