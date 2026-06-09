@@ -364,6 +364,31 @@ class RealSenseCamera(Camera):
 
         return depth_map
 
+    @check_if_not_connected
+    def read_latest_rgbd(self, max_age_ms: int = 500) -> tuple[NDArray[Any], NDArray[Any]]:
+        """Return the latest color and depth frames from the same cached RealSense frameset."""
+        if not self.use_depth:
+            raise RuntimeError(f"Failed to read RGB-D frame. Depth stream is not enabled for {self}.")
+
+        if self.thread is None or not self.thread.is_alive():
+            raise RuntimeError(f"{self} read thread is not running.")
+
+        with self.frame_lock:
+            color_frame = self.latest_color_frame
+            depth_frame = self.latest_depth_frame
+            timestamp = self.latest_timestamp
+
+        if color_frame is None or depth_frame is None or timestamp is None:
+            raise RuntimeError(f"{self} has not captured any RGB-D frames yet.")
+
+        age_ms = (time.perf_counter() - timestamp) * 1e3
+        if age_ms > max_age_ms:
+            raise TimeoutError(
+                f"{self} latest RGB-D frame is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
+            )
+
+        return color_frame, depth_frame
+
     def _read_from_hardware(self):
         if self.rs_pipeline is None:
             raise RuntimeError(f"{self}: rs_pipeline must be initialized before use.")
@@ -465,9 +490,10 @@ class RealSenseCamera(Camera):
         Internal loop run by the background thread for asynchronous reading.
 
         On each iteration:
-        1. Reads a color frame with 500ms timeout
-        2. Stores result in latest_frame and updates timestamp (thread-safe)
-        3. Sets new_frame_event to notify listeners
+        1. Reads one RealSense frameset from the camera pipeline.
+        2. Extracts color and, when enabled, depth from that same frameset.
+        3. Stores the latest frame data and timestamp thread-safely.
+        4. Sets new_frame_event to notify listeners.
 
         Stops on DeviceNotConnectedError, logs other errors and continues.
         """

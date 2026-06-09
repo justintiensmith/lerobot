@@ -46,10 +46,12 @@ def _validate_feature_names(features: dict[str, dict]) -> None:
 
 
 def is_dataset_feature_spec(value: Any) -> bool:
+    """Return True when a hardware feature is already a full dataset feature spec."""
     return isinstance(value, dict) and {"dtype", "shape"}.issubset(value)
 
 
 def _prefix_feature_key(key: str, prefix: str) -> str:
+    """Add the dataset prefix unless the key is already prefixed."""
     return key if key == prefix or key.startswith(f"{prefix}.") else f"{prefix}.{key}"
 
 
@@ -73,6 +75,10 @@ def hw_to_dataset_features(
         dict: A LeRobot features dictionary.
     """
     features = {}
+    # Some hardware features are already complete dataset specs, e.g.
+    # {"dtype": "uint16", "shape": (480, 640), "names": ["height", "width"]}.
+    # Keep those out of `joint_fts` so arrays like depth maps are not collapsed
+    # into the 1D `observation.state` vector.
     dataset_fts = {key: ftype for key, ftype in hw_features.items() if is_dataset_feature_spec(ftype)}
     joint_fts = {
         key: ftype
@@ -108,6 +114,9 @@ def hw_to_dataset_features(
             "names": ["height", "width", "channels"],
         }
 
+    # Preserve explicit dataset specs under the current namespace. For example,
+    # "depths.middle" becomes "observation.depths.middle", while an already
+    # prefixed key like "observation.depths.middle" is left unchanged.
     for key, feature in dataset_fts.items():
         features[_prefix_feature_key(key, prefix)] = feature
 

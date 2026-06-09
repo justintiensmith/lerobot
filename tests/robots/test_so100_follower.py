@@ -139,7 +139,7 @@ def test_get_observation_includes_raw_motor_current_when_enabled(follower):
     np.testing.assert_array_equal(frame[f"{OBS_STR}.state"], expected_state)
     np.testing.assert_array_equal(obs["motor_currents"], expected_currents)
     np.testing.assert_array_equal(frame[OBS_MOTOR_CURRENTS], expected_currents)
-    follower.bus.sync_read.assert_any_call("Present_Current", normalize=False)
+    follower.bus.sync_read.assert_any_call("Present_Current", num_retry=3, normalize=False)
 
 
 def test_get_observation_includes_raw_motor_velocity_when_enabled(follower):
@@ -169,7 +169,7 @@ def test_get_observation_includes_raw_motor_velocity_when_enabled(follower):
     np.testing.assert_array_equal(frame[f"{OBS_STR}.state"], expected_state)
     np.testing.assert_array_equal(obs["motor_velocities"], expected_velocities)
     np.testing.assert_array_equal(frame[OBS_MOTOR_VELOCITIES], expected_velocities)
-    follower.bus.sync_read.assert_any_call("Present_Velocity", normalize=False)
+    follower.bus.sync_read.assert_any_call("Present_Velocity", num_retry=3, normalize=False)
 
 
 def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower):
@@ -179,8 +179,7 @@ def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower
 
     camera = MagicMock(name="DepthCamera")
     camera.is_connected = True
-    camera.read_latest.return_value = rgb_image
-    camera.read_depth.return_value = depth_map
+    camera.read_latest_rgbd.return_value = (rgb_image, depth_map)
 
     follower.config.cameras = {camera_name: SimpleNamespace(height=2, width=3, use_depth=True)}
     follower.cameras = {camera_name: camera}
@@ -209,7 +208,9 @@ def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower
     }
     np.testing.assert_array_equal(frame[dataset_depth_key], depth_map)
     np.testing.assert_array_equal(frame[f"{OBS_IMAGES}.{camera_name}"], rgb_image)
-    camera.read_depth.assert_called_once_with(timeout_ms=0)
+    camera.read_latest_rgbd.assert_called_once_with()
+    camera.read_latest.assert_not_called()
+    camera.read_depth.assert_not_called()
 
 
 def test_send_action(follower):

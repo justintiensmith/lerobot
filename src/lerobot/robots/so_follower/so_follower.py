@@ -215,27 +215,15 @@ class SOFollower(Robot):
     def get_observation(self) -> RobotObservation:
         # Read arm position
         start = time.perf_counter()
-        
-        last_error = None
-        for attempt in range(5):
-            try:
-                obs_dict = self.bus.sync_read("Present_Position")
-                break
-            except Exception as e:
-                last_error = e
-                logger.warning(f"{self} sync_read failed attempt {attempt+1}/5: {e}")
-                time.sleep(0.002)
-        else:
-            raise last_error
-
+        obs_dict = self.bus.sync_read("Present_Position", num_retry=3)
         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
-
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
+        # Read arm motor currents when enabled in config. Can be used for force estimation and collision detection.
         if self.config.observe_motor_current:
             start = time.perf_counter()
-            current_values = self.bus.sync_read("Present_Current", normalize=False)
+            current_values = self.bus.sync_read("Present_Current", num_retry=3, normalize=False)
             obs_dict[RAW_MOTOR_CURRENTS] = np.array(
                 [current_values[motor] for motor in self.bus.motors],
                 dtype=np.int32,
@@ -243,9 +231,11 @@ class SOFollower(Robot):
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read motor currents: {dt_ms:.1f}ms")
 
+        # Read arm motor velocities when enabled in config. Can be used for velocity-based control or
+        # dynamics estimation.
         if self.config.observe_motor_velocity:
             start = time.perf_counter()
-            velocity_values = self.bus.sync_read("Present_Velocity", normalize=False)
+            velocity_values = self.bus.sync_read("Present_Velocity", num_retry=3, normalize=False)
             obs_dict[RAW_MOTOR_VELOCITIES] = np.array(
                 [velocity_values[motor] for motor in self.bus.motors],
                 dtype=np.int32,
@@ -256,9 +246,20 @@ class SOFollower(Robot):
         # Capture images from cameras
         for cam_key, cam in self.cameras.items():
             start = time.perf_counter()
-            obs_dict[cam_key] = cam.read_latest()
+            # Default to RGB-only for cameras that do not define `use_depth` (e.g. OpenCV cameras).
+            # If this default were True, non-depth cameras would incorrectly enter the RGB-D path.
             if getattr(self.config.cameras[cam_key], "use_depth", False):
-                obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = cam.read_depth(timeout_ms=0)
+                # For depth-enabled RealSense cameras, read RGB and depth together from the same
+                # cached frameset so dataset frames do not mix RGB from one timestamp with depth from another.
+                read_latest_rgbd = getattr(cam, "read_latest_rgbd", None)
+                if read_latest_rgbd is None:
+                    raise RuntimeError(
+                        f"Camera '{cam_key}' has use_depth=True but does not support "
+                        "synchronized RGB-D reads."
+                    )
+                obs_dict[cam_key], obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = read_latest_rgbd()
+            else:
+                obs_dict[cam_key] = cam.read_latest()
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
 
