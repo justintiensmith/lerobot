@@ -367,6 +367,14 @@ class RealSenseCamera(Camera):
     @check_if_not_connected
     def read_latest_rgbd(self, max_age_ms: int = 500) -> tuple[NDArray[Any], NDArray[Any]]:
         """Return the latest color and depth frames from the same cached RealSense frameset."""
+        color_frame, depth_frame, _ = self.read_latest_rgbd_with_timestamp(max_age_ms=max_age_ms)
+        return color_frame, depth_frame
+
+    @check_if_not_connected
+    def read_latest_rgbd_with_timestamp(
+        self, max_age_ms: int = 500
+    ) -> tuple[NDArray[Any], NDArray[Any], float]:
+        """Return latest RGB-D frames and their cached software capture timestamp."""
         if not self.use_depth:
             raise RuntimeError(f"Failed to read RGB-D frame. Depth stream is not enabled for {self}.")
 
@@ -387,7 +395,7 @@ class RealSenseCamera(Camera):
                 f"{self} latest RGB-D frame is too old: {age_ms:.1f} ms (max allowed: {max_age_ms} ms)."
             )
 
-        return color_frame, depth_frame
+        return color_frame, depth_frame, timestamp
 
     def _read_from_hardware(self):
         if self.rs_pipeline is None:
@@ -504,6 +512,7 @@ class RealSenseCamera(Camera):
         while not self.stop_event.is_set():
             try:
                 frame = self._read_from_hardware()
+                capture_time = time.perf_counter()
                 color_frame_raw = frame.get_color_frame()
                 color_frame = np.asanyarray(color_frame_raw.get_data())
                 processed_color_frame = self._postprocess_image(color_frame)
@@ -513,9 +522,9 @@ class RealSenseCamera(Camera):
                     depth_frame = np.asanyarray(depth_frame_raw.get_data())
                     processed_depth_frame = self._postprocess_image(depth_frame, depth_frame=True)
 
-                capture_time = time.perf_counter()
-
                 with self.frame_lock:
+                    # Copy frames because pyrealsense/numpy buffers may be reused by later reads.
+                    # `latest_timestamp` uses the same monotonic clock as robot sensor timestamps.
                     self.latest_color_frame = processed_color_frame.copy()
                     if self.use_depth:
                         self.latest_depth_frame = processed_depth_frame.copy()

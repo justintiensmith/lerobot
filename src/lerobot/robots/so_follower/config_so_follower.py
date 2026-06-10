@@ -47,6 +47,9 @@ class SOFollowerConfig:
     # Include raw Present_Velocity motor register values in observations.
     observe_motor_velocity: bool = False
 
+    # Include per-sensor `time.perf_counter()` timestamps in observations for post-hoc alignment.
+    observe_sensor_timestamps: bool = False
+
 
 @RobotConfig.register_subclass("so101_follower")
 @RobotConfig.register_subclass("so100_follower")

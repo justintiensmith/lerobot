@@ -25,7 +25,14 @@ from lerobot.robots.so_follower import (
     SO100Follower,
     SO100FollowerConfig,
 )
-from lerobot.utils.constants import OBS_DEPTHS, OBS_IMAGES, OBS_MOTOR_CURRENTS, OBS_MOTOR_VELOCITIES, OBS_STR
+from lerobot.utils.constants import (
+    OBS_DEPTHS,
+    OBS_IMAGES,
+    OBS_MOTOR_CURRENTS,
+    OBS_MOTOR_VELOCITIES,
+    OBS_SENSOR_TIMESTAMPS,
+    OBS_STR,
+)
 from lerobot.utils.feature_utils import build_dataset_frame, hw_to_dataset_features
 
 
@@ -172,6 +179,33 @@ def test_get_observation_includes_raw_motor_velocity_when_enabled(follower):
     follower.bus.sync_read.assert_any_call("Present_Velocity", num_retry=3, normalize=False)
 
 
+def test_get_observation_includes_sensor_timestamps_when_enabled(follower):
+    follower.config.observe_motor_current = True
+    follower.config.observe_motor_velocity = True
+    follower.config.observe_sensor_timestamps = True
+
+    follower.connect()
+    obs = follower.get_observation()
+    dataset_features = hw_to_dataset_features(follower.observation_features, OBS_STR, use_video=True)
+    frame = build_dataset_frame(dataset_features, obs, prefix=OBS_STR)
+
+    expected_names = [
+        "motor_positions.perf_counter_s",
+        "motor_currents.perf_counter_s",
+        "motor_velocities.perf_counter_s",
+    ]
+    assert dataset_features[OBS_SENSOR_TIMESTAMPS] == {
+        "dtype": "float64",
+        "shape": (len(expected_names),),
+        "names": expected_names,
+    }
+    assert obs["sensor_timestamps"].shape == (len(expected_names),)
+    assert obs["sensor_timestamps"].dtype == np.float64
+    assert np.all(obs["sensor_timestamps"] > 0)
+    assert np.all(np.diff(obs["sensor_timestamps"]) >= 0)
+    np.testing.assert_array_equal(frame[OBS_SENSOR_TIMESTAMPS], obs["sensor_timestamps"])
+
+
 def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower):
     camera_name = "angled_realsense"
     rgb_image = np.full((2, 3, 3), 7, dtype=np.uint8)
@@ -214,6 +248,43 @@ def test_get_observation_includes_metric_depth_for_depth_enabled_camera(follower
     camera.read_latest_rgbd.assert_called_once_with()
     camera.read_latest.assert_not_called()
     camera.read_depth.assert_not_called()
+
+
+def test_get_observation_uses_rgbd_capture_timestamp_when_enabled(follower):
+    camera_name = "angled_realsense"
+    rgb_image = np.full((2, 3, 3), 7, dtype=np.uint8)
+    depth_map = np.array([[0, 2500, 5000], [6000, 1000, 4000]], dtype=np.uint16)
+    camera_timestamp = 123.456
+
+    camera = MagicMock(name="DepthCamera")
+    camera.is_connected = True
+    camera.read_latest_rgbd_with_timestamp.return_value = (rgb_image, depth_map, camera_timestamp)
+
+    follower.config.observe_sensor_timestamps = True
+    follower.config.cameras = {camera_name: SimpleNamespace(height=2, width=3, use_depth=True)}
+    follower.cameras = {camera_name: camera}
+
+    raw_depth_key = f"depths.{camera_name}"
+    dataset_depth_key = f"{OBS_DEPTHS}.{camera_name}"
+
+    follower.connect()
+    obs = follower.get_observation()
+    dataset_features = hw_to_dataset_features(follower.observation_features, OBS_STR, use_video=True)
+    frame = build_dataset_frame(dataset_features, obs, prefix=OBS_STR)
+
+    np.testing.assert_array_equal(obs[camera_name], rgb_image)
+    np.testing.assert_array_equal(obs[raw_depth_key], depth_map)
+    np.testing.assert_array_equal(frame[dataset_depth_key], depth_map)
+    assert dataset_features[OBS_SENSOR_TIMESTAMPS] == {
+        "dtype": "float64",
+        "shape": (2,),
+        "names": ["motor_positions.perf_counter_s", f"camera.{camera_name}.perf_counter_s"],
+    }
+    assert obs["sensor_timestamps"].shape == (2,)
+    assert obs["sensor_timestamps"][1] == camera_timestamp
+    np.testing.assert_array_equal(frame[OBS_SENSOR_TIMESTAMPS], obs["sensor_timestamps"])
+    camera.read_latest_rgbd_with_timestamp.assert_called_once_with()
+    camera.read_latest_rgbd.assert_not_called()
 
 
 def test_send_action(follower):

@@ -27,7 +27,13 @@ from lerobot.motors.feetech import (
     OperatingMode,
 )
 from lerobot.types import RobotAction, RobotObservation
-from lerobot.utils.constants import OBS_DEPTHS, OBS_MOTOR_CURRENTS, OBS_MOTOR_VELOCITIES, OBS_STR
+from lerobot.utils.constants import (
+    OBS_DEPTHS,
+    OBS_MOTOR_CURRENTS,
+    OBS_MOTOR_VELOCITIES,
+    OBS_SENSOR_TIMESTAMPS,
+    OBS_STR,
+)
 from lerobot.utils.decorators import check_if_already_connected, check_if_not_connected
 
 from ..robot import Robot
@@ -38,6 +44,7 @@ logger = logging.getLogger(__name__)
 RAW_DEPTHS = OBS_DEPTHS.removeprefix(f"{OBS_STR}.")
 RAW_MOTOR_CURRENTS = OBS_MOTOR_CURRENTS.removeprefix(f"{OBS_STR}.")
 RAW_MOTOR_VELOCITIES = OBS_MOTOR_VELOCITIES.removeprefix(f"{OBS_STR}.")
+RAW_SENSOR_TIMESTAMPS = OBS_SENSOR_TIMESTAMPS.removeprefix(f"{OBS_STR}.")
 
 
 class SOFollower(Robot):
@@ -97,6 +104,31 @@ class SOFollower(Robot):
         }
 
     @property
+    def _sensor_timestamp_names(self) -> list[str]:
+        # Keep this order identical to the order timestamps are appended in `get_observation`.
+        names = ["motor_positions.perf_counter_s"]
+        if self.config.observe_motor_current:
+            names.append("motor_currents.perf_counter_s")
+        if self.config.observe_motor_velocity:
+            names.append("motor_velocities.perf_counter_s")
+        names.extend(f"camera.{cam}.perf_counter_s" for cam in self.cameras)
+        return names
+
+    @property
+    def _sensor_timestamps_ft(self) -> dict[str, dict]:
+        if not self.config.observe_sensor_timestamps:
+            return {}
+        names = self._sensor_timestamp_names
+        return {
+            RAW_SENSOR_TIMESTAMPS: {
+                # One vector per dataset frame. `names` identifies each timestamp column.
+                "dtype": "float64",
+                "shape": (len(names),),
+                "names": names,
+            }
+        }
+
+    @property
     def _cameras_ft(self) -> dict[str, tuple | dict]:
         camera_features = {}
         for cam in self.cameras:
@@ -111,7 +143,13 @@ class SOFollower(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple | dict]:
-        return {**self._motors_ft, **self._motor_currents_ft, **self._motor_velocities_ft, **self._cameras_ft}
+        return {
+            **self._motors_ft,
+            **self._motor_currents_ft,
+            **self._motor_velocities_ft,
+            **self._sensor_timestamps_ft,
+            **self._cameras_ft,
+        }
 
     @cached_property
     def action_features(self) -> dict[str, type]:
@@ -213,22 +251,35 @@ class SOFollower(Robot):
 
     @check_if_not_connected
     def get_observation(self) -> RobotObservation:
+        # These timestamps use Python's monotonic clock (`time.perf_counter`) so they are comparable
+        # within one recording process. They are not wall-clock time and should only be used via differences.
+        sensor_timestamps = []
+
         # Read arm position
         start = time.perf_counter()
         obs_dict = self.bus.sync_read("Present_Position", num_retry=3)
+        read_end = time.perf_counter()
+        if self.config.observe_sensor_timestamps:
+            # Motor registers are read with blocking serial transactions, so the exact sample instant is
+            # unknown. The midpoint is the best software estimate using the same clock as the cameras.
+            sensor_timestamps.append((start + read_end) / 2)
         obs_dict = {f"{motor}.pos": val for motor, val in obs_dict.items()}
-        dt_ms = (time.perf_counter() - start) * 1e3
+        dt_ms = (read_end - start) * 1e3
         logger.debug(f"{self} read state: {dt_ms:.1f}ms")
 
         # Read arm motor currents when enabled in config. Can be used for force estimation and collision detection.
         if self.config.observe_motor_current:
             start = time.perf_counter()
             current_values = self.bus.sync_read("Present_Current", num_retry=3, normalize=False)
+            read_end = time.perf_counter()
+            if self.config.observe_sensor_timestamps:
+                # Same midpoint convention as position: one timestamp for the whole multi-motor sync read.
+                sensor_timestamps.append((start + read_end) / 2)
             obs_dict[RAW_MOTOR_CURRENTS] = np.array(
                 [current_values[motor] for motor in self.bus.motors],
                 dtype=np.int32,
             )
-            dt_ms = (time.perf_counter() - start) * 1e3
+            dt_ms = (read_end - start) * 1e3
             logger.debug(f"{self} read motor currents: {dt_ms:.1f}ms")
 
         # Read arm motor velocities when enabled in config. Can be used for velocity-based control or
@@ -236,11 +287,15 @@ class SOFollower(Robot):
         if self.config.observe_motor_velocity:
             start = time.perf_counter()
             velocity_values = self.bus.sync_read("Present_Velocity", num_retry=3, normalize=False)
+            read_end = time.perf_counter()
+            if self.config.observe_sensor_timestamps:
+                # Same midpoint convention as position: one timestamp for the whole multi-motor sync read.
+                sensor_timestamps.append((start + read_end) / 2)
             obs_dict[RAW_MOTOR_VELOCITIES] = np.array(
                 [velocity_values[motor] for motor in self.bus.motors],
                 dtype=np.int32,
             )
-            dt_ms = (time.perf_counter() - start) * 1e3
+            dt_ms = (read_end - start) * 1e3
             logger.debug(f"{self} read motor velocities: {dt_ms:.1f}ms")
 
         # Capture images from cameras
@@ -257,11 +312,32 @@ class SOFollower(Robot):
                         f"Camera '{cam_key}' has use_depth=True but does not support "
                         "synchronized RGB-D reads."
                     )
-                obs_dict[cam_key], obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = read_latest_rgbd()
+                if self.config.observe_sensor_timestamps:
+                    read_latest_rgbd_with_timestamp = getattr(cam, "read_latest_rgbd_with_timestamp", None)
+                    if read_latest_rgbd_with_timestamp is not None:
+                        # RealSense RGB and depth share this cached software timestamp because they come
+                        # from the same frameset in the camera read thread.
+                        obs_dict[cam_key], obs_dict[f"{RAW_DEPTHS}.{cam_key}"], camera_timestamp = (
+                            read_latest_rgbd_with_timestamp()
+                        )
+                    else:
+                        # Fallback for any future depth camera that lacks timestamp support.
+                        obs_dict[cam_key], obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = read_latest_rgbd()
+                        camera_timestamp = (start + time.perf_counter()) / 2
+                    sensor_timestamps.append(camera_timestamp)
+                else:
+                    obs_dict[cam_key], obs_dict[f"{RAW_DEPTHS}.{cam_key}"] = read_latest_rgbd()
             else:
                 obs_dict[cam_key] = cam.read_latest()
+                if self.config.observe_sensor_timestamps:
+                    # Generic cameras currently expose no hardware/cached frame timestamp, so use the
+                    # midpoint of the software read call.
+                    sensor_timestamps.append((start + time.perf_counter()) / 2)
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"{self} read {cam_key}: {dt_ms:.1f}ms")
+
+        if self.config.observe_sensor_timestamps:
+            obs_dict[RAW_SENSOR_TIMESTAMPS] = np.array(sensor_timestamps, dtype=np.float64)
 
         return obs_dict
 
