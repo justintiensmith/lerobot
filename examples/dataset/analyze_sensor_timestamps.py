@@ -83,9 +83,13 @@ def load_timestamp_matrix(dataset: LeRobotDataset, key: str) -> tuple[np.ndarray
     timestamps = []
     frame_indices = []
     episode_indices = []
+    raw_hf_dataset = dataset.hf_dataset.with_format(None)
 
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
+    for idx in range(len(raw_hf_dataset)):
+        # LeRobotDataset installs hf_transform_to_torch on its HF dataset. That transform can
+        # downcast large absolute perf_counter values, which quantizes millisecond offsets.
+        # with_format(None) gives us the stored values directly for timestamp diagnostics.
+        sample = raw_hf_dataset[idx]
         timestamps.append(to_numpy(sample[key]).astype(np.float64))
         frame_indices.append(int(to_numpy(sample["frame_index"]).item()))
         episode_indices.append(int(to_numpy(sample["episode_index"]).item()))
