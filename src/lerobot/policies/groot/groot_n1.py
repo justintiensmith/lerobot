@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,8 +32,13 @@ if TYPE_CHECKING or _transformers_available:
     from transformers.feature_extraction_utils import BatchFeature
 else:
 
-    def strict(cls):
-        return cls
+    def strict(cls=None, *, accept_kwargs: bool = False):
+        del accept_kwargs
+
+        def wrap(cls):
+            return cls
+
+        return wrap(cls) if cls is not None else wrap
 
     AutoConfig = None
     AutoModel = None
@@ -178,7 +184,8 @@ N_COLOR_CHANNELS = 3
 
 
 # config
-@strict
+@strict(accept_kwargs=True)
+@dataclass
 class GR00TN15Config(PretrainedConfig):
     model_type = "gr00t_n1_5"
 
@@ -191,7 +198,11 @@ class GR00TN15Config(PretrainedConfig):
     def __post_init__(self, **kwargs):
         self.backbone_cfg = {} if self.backbone_cfg is None else self.backbone_cfg
         self.action_head_cfg = {} if self.action_head_cfg is None else self.action_head_cfg
-        super().__post_init__(**kwargs)
+        base_post_init = getattr(super(), "__post_init__", None)
+        if base_post_init is not None:
+            base_post_init(**kwargs)
+        else:
+            super().__init__(**kwargs)
 
 
 # real model
