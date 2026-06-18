@@ -18,6 +18,7 @@ import json
 import logging
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 
 pytest.importorskip("datasets", reason="datasets is required (install lerobot[dataset])")
@@ -29,6 +30,13 @@ from lerobot.configs import VIDEO_ENCODER_INFO_KEYS
 from lerobot.datasets.aggregate import aggregate_datasets
 from lerobot.datasets.feature_utils import features_equal_for_merge
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.utils.constants import (
+    ACTION,
+    OBS_DEPTHS,
+    OBS_MOTOR_CURRENTS,
+    OBS_MOTOR_VELOCITIES,
+    OBS_STATE,
+)
 from tests.fixtures.constants import DUMMY_REPO_ID
 
 
@@ -702,6 +710,107 @@ def test_aggregate_image_datasets(tmp_path, lerobot_dataset_factory):
         assert img.shape[0] == 3, f"Image {image_key} should have 3 channels"
 
     assert_dataset_iteration_works(aggr_ds)
+
+
+def _create_depth_telemetry_dataset(root, repo_id, value_offset):
+    motor_names = [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper",
+    ]
+    depth_key = f"{OBS_DEPTHS}.middle"
+    features = {
+        ACTION: {"dtype": "float32", "shape": (6,), "names": motor_names},
+        OBS_STATE: {"dtype": "float32", "shape": (6,), "names": motor_names},
+        OBS_MOTOR_CURRENTS: {"dtype": "float32", "shape": (6,), "names": motor_names},
+        OBS_MOTOR_VELOCITIES: {"dtype": "float32", "shape": (6,), "names": motor_names},
+        depth_key: {"dtype": "uint16", "shape": (2, 3), "names": ["height", "width"]},
+    }
+    dataset = LeRobotDataset.create(
+        repo_id=repo_id,
+        fps=30,
+        features=features,
+        root=root,
+        use_videos=False,
+    )
+
+    for episode_idx in range(2):
+        for frame_idx in range(3):
+            value = value_offset + episode_idx * 10 + frame_idx
+            dataset.add_frame(
+                {
+                    ACTION: np.full((6,), value + 0.1, dtype=np.float32),
+                    OBS_STATE: np.full((6,), value + 0.2, dtype=np.float32),
+                    OBS_MOTOR_CURRENTS: np.arange(6, dtype=np.float32) + value,
+                    OBS_MOTOR_VELOCITIES: np.arange(6, dtype=np.float32) - value,
+                    depth_key: (np.arange(6, dtype=np.uint16).reshape(2, 3) + value).astype(
+                        np.uint16
+                    ),
+                    "task": "Pick and place all yellow objects.",
+                }
+            )
+        dataset.save_episode()
+    dataset.finalize()
+    return dataset
+
+
+def _as_numpy(value):
+    if torch.is_tensor(value):
+        return value.cpu().numpy()
+    return np.asarray(value)
+
+
+def test_aggregate_depth_arrays_and_motor_telemetry(tmp_path):
+    """Depth Array2D features and 1D motor telemetry should survive aggregation."""
+    depth_key = f"{OBS_DEPTHS}.middle"
+    ds_0 = _create_depth_telemetry_dataset(
+        tmp_path / "depth_0", f"{DUMMY_REPO_ID}_depth_0", value_offset=0
+    )
+    ds_1 = _create_depth_telemetry_dataset(
+        tmp_path / "depth_1", f"{DUMMY_REPO_ID}_depth_1", value_offset=100
+    )
+
+    aggr_root = tmp_path / "depth_aggr"
+    aggregate_datasets(
+        repo_ids=[ds_0.repo_id, ds_1.repo_id],
+        roots=[ds_0.root, ds_1.root],
+        aggr_repo_id=f"{DUMMY_REPO_ID}_depth_aggr",
+        aggr_root=aggr_root,
+    )
+
+    aggr_ds = LeRobotDataset(f"{DUMMY_REPO_ID}_depth_aggr", root=aggr_root)
+
+    assert_episode_and_frame_counts(
+        aggr_ds, ds_0.num_episodes + ds_1.num_episodes, len(ds_0) + len(ds_1)
+    )
+    assert aggr_ds.features[depth_key] == ds_0.features[depth_key]
+
+    first_item = aggr_ds[0]
+    np.testing.assert_array_equal(
+        _as_numpy(first_item[depth_key]),
+        np.arange(6, dtype=np.uint16).reshape(2, 3),
+    )
+    np.testing.assert_allclose(
+        _as_numpy(first_item[OBS_MOTOR_CURRENTS]), np.arange(6, dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        _as_numpy(first_item[OBS_MOTOR_VELOCITIES]), np.arange(6, dtype=np.float32)
+    )
+
+    first_ds_1_item = aggr_ds[len(ds_0)]
+    np.testing.assert_array_equal(
+        _as_numpy(first_ds_1_item[depth_key]),
+        (np.arange(6, dtype=np.uint16).reshape(2, 3) + 100).astype(np.uint16),
+    )
+    np.testing.assert_allclose(
+        _as_numpy(first_ds_1_item[OBS_MOTOR_CURRENTS]), np.arange(6, dtype=np.float32) + 100
+    )
+    np.testing.assert_allclose(
+        _as_numpy(first_ds_1_item[OBS_MOTOR_VELOCITIES]), np.arange(6, dtype=np.float32) - 100
+    )
 
 
 def test_aggregate_already_merged_dataset(tmp_path, lerobot_dataset_factory):

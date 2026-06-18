@@ -33,7 +33,7 @@ from .io_utils import (
     get_file_size_in_mb,
     get_parquet_file_size_in_mb,
     to_parquet_one_row_group_per_episode,
-    to_parquet_with_hf_images,
+    to_parquet_with_hf_features,
     write_info,
     write_stats,
     write_tasks,
@@ -48,6 +48,19 @@ from .utils import (
     update_chunk_file_indices,
 )
 from .video_utils import concatenate_video_files, get_video_duration_in_s
+
+
+def _requires_hf_feature_serialization(features: dict[str, dict]) -> bool:
+    return any(
+        ft["dtype"] == "image" or (ft["dtype"] != "video" and len(ft.get("shape", ())) > 1)
+        for ft in features.values()
+    )
+
+
+def _read_parquet_with_hf_features(path: Path) -> pd.DataFrame:
+    """Read HF-typed parquet while normalizing extension dtypes before pandas concat."""
+    df = datasets.Dataset.from_parquet(str(path)).to_pandas()
+    return pd.DataFrame(df.to_dict(orient="list"))
 
 
 def merge_video_feature_info_for_aggregate(all_metadata: list[LeRobotDatasetMetadata]) -> dict[str, dict]:
@@ -518,10 +531,10 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
     }
 
     unique_chunk_file_ids = sorted(unique_chunk_file_ids)
-    contains_images = len(dst_meta.image_keys) > 0
+    use_hf_features = _requires_hf_feature_serialization(dst_meta.features)
 
-    # retrieve features schema for proper image typing in parquet
-    hf_features = get_hf_features_from_features(dst_meta.features) if contains_images else None
+    # Retrieve features schema for image typing and structured array columns.
+    hf_features = get_hf_features_from_features(dst_meta.features) if use_hf_features else None
 
     # Track source to destination file mapping for metadata update
     # This is critical for handling datasets that are already results of a merge
@@ -531,12 +544,11 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
         src_path = src_meta.root / DEFAULT_DATA_PATH.format(
             chunk_index=src_chunk_idx, file_index=src_file_idx
         )
-        if contains_images:
-            # Use HuggingFace datasets to read source data to preserve image format
-            src_ds = datasets.Dataset.from_parquet(str(src_path))
-            df = src_ds.to_pandas()
-        else:
-            df = pd.read_parquet(src_path)
+        df = (
+            _read_parquet_with_hf_features(src_path)
+            if use_hf_features
+            else pd.read_parquet(src_path)
+        )
         df = update_data_df(df, src_meta, dst_meta)
 
         # Write data and get the actual destination file it was written to
@@ -548,7 +560,7 @@ def aggregate_data(src_meta, dst_meta, data_idx, data_files_size_in_mb, chunk_si
             data_files_size_in_mb,
             chunk_size,
             DEFAULT_DATA_PATH,
-            contains_images=contains_images,
+            use_hf_features=use_hf_features,
             aggr_root=dst_meta.root,
             hf_features=hf_features,
             concatenate=concatenate_data,
@@ -608,7 +620,7 @@ def aggregate_metadata(src_meta, dst_meta, meta_idx, data_idx, videos_idx):
             DEFAULT_DATA_FILE_SIZE_IN_MB,
             DEFAULT_CHUNK_SIZE,
             DEFAULT_EPISODES_PATH,
-            contains_images=False,
+            use_hf_features=False,
             aggr_root=dst_meta.root,
         )
 
@@ -626,7 +638,7 @@ def append_or_create_parquet_file(
     max_mb: float,
     chunk_size: int,
     default_path: str,
-    contains_images: bool = False,
+    use_hf_features: bool = False,
     aggr_root: Path = None,
     hf_features: datasets.Features | None = None,
     concatenate: bool = True,
@@ -644,9 +656,9 @@ def append_or_create_parquet_file(
         max_mb: Maximum allowed file size in MB before rotation.
         chunk_size: Maximum number of files per chunk before incrementing chunk index.
         default_path: Format string for generating file paths.
-        contains_images: Whether the data contains images requiring special handling.
+        use_hf_features: Whether the data needs Hugging Face feature-aware serialization.
         aggr_root: Root path for the aggregated dataset.
-        hf_features: Optional HuggingFace Features schema for proper image typing.
+        hf_features: Optional HuggingFace Features schema for image and array typing.
         concatenate: When False, always rotate to a new file instead of appending to the current one.
         one_row_group_per_episode: True for DATA parquet (emit one row group per episode); False for
             the episodes-metadata parquet (already one row per episode).
@@ -660,8 +672,8 @@ def append_or_create_parquet_file(
 
     if not dst_path.exists():
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        if contains_images:
-            to_parquet_with_hf_images(df, dst_path, features=hf_features)
+        if use_hf_features:
+            to_parquet_with_hf_features(df, dst_path, features=hf_features)
         elif one_row_group_per_episode:
             to_parquet_one_row_group_per_episode(df, dst_path)
         else:
@@ -679,17 +691,16 @@ def append_or_create_parquet_file(
         final_df = df
         target_path = new_path
     else:
-        if contains_images:
-            # Use HuggingFace datasets to read existing data to preserve image format
-            existing_ds = datasets.Dataset.from_parquet(str(dst_path))
-            existing_df = existing_ds.to_pandas()
+        if use_hf_features:
+            # Use HuggingFace datasets to read existing data to preserve image and array formats.
+            existing_df = _read_parquet_with_hf_features(dst_path)
         else:
             existing_df = pd.read_parquet(dst_path)
         final_df = pd.concat([existing_df, df], ignore_index=True)
         target_path = dst_path
 
-    if contains_images:
-        to_parquet_with_hf_images(final_df, target_path, features=hf_features)
+    if use_hf_features:
+        to_parquet_with_hf_features(final_df, target_path, features=hf_features)
     elif one_row_group_per_episode:
         to_parquet_one_row_group_per_episode(final_df, target_path)
     else:

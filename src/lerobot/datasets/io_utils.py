@@ -288,14 +288,14 @@ def write_table_one_row_group_per_episode(table: pa.Table, path: Path) -> None:
         writer.close()
 
 
-def to_parquet_with_hf_images(
+def to_parquet_with_hf_features(
     df: pandas.DataFrame, path: Path, features: datasets.Features | None = None
 ) -> None:
-    """Write a DataFrame with HF-encoded images to parquet, one row group per episode.
+    """Write a DataFrame with Hugging Face feature typing, one row group per episode.
 
     Images are embedded into the arrow table first (``ParquetWriter.write_table``
-    does not embed external image files like ``Dataset.to_parquet`` does).
-    ``features`` types image columns as ``Image()`` in the parquet schema.
+    does not embed external image files like ``Dataset.to_parquet`` does), and
+    structured array columns keep their declared ``Array2D``/``Array3D`` schema.
     """
     ds = datasets.Dataset.from_dict(df.to_dict(orient="list"), features=features)
     ds = embed_images(ds)
@@ -305,6 +305,13 @@ def to_parquet_with_hf_images(
     else:
         # No episode boundaries to align row groups to — keep a single write.
         pq.write_table(table, str(path))
+
+
+def to_parquet_with_hf_images(
+    df: pandas.DataFrame, path: Path, features: datasets.Features | None = None
+) -> None:
+    """Write a DataFrame with HF-encoded images to parquet, one row group per episode."""
+    to_parquet_with_hf_features(df, path, features)
 
 
 def to_parquet_one_row_group_per_episode(df: pandas.DataFrame, path: Path) -> None:
